@@ -1,0 +1,45 @@
+{{-
+/******************************
+Use the basic template for <= 1.31
+***********************************/
+-}}
+{{- if and (eq .CatalogVersion.Major 1) (le .CatalogVersion.Minor 31) -}}
+schema: olm.template.basic
+entries:
+  - schema: olm.package
+    name: cockroachdb
+    defaultChannel: stable
+  - schema: olm.channel
+    package: cockroachdb
+    entries:
+{{- range $i, $b := .Bundles }}
+      - name: {{ .Name }}
+{{- if gt $i 0 }}
+        replaces: {{ (index $.Bundles (add $i -1)).Name }}
+{{- end -}}
+{{- with index $.Values.skipRanges .Name }}
+        skipRange: {{ . }}
+{{- end -}}
+{{- end }}
+{{- range .Bundles }}
+  - schema: olm.bundle
+    image: {{ .Image }}
+{{- end }}
+{{- end -}}
+
+{{-
+/******************************
+Use the semver template for >= 1.32
+***********************************/
+-}}
+{{- if and (eq .CatalogVersion.Major 1) (ge .CatalogVersion.Minor 32) -}}
+schema: olm.semver
+generateMajorChannels: true
+generateMinorChannels: true
+stable:
+  bundles:
+{{- range .Bundles }}
+    # {{ .Name }}
+    - image: {{ .Image }}
+{{- end }}
+{{- end -}}

@@ -1,0 +1,2 @@
+skipRanges:
+  "cockroachdb.v3.0.7": "<3.0.7-0"

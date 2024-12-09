@@ -1,0 +1,11 @@
+schema: olm.semver
+generateMajorChannels: true
+generateMinorChannels: true
+stable:
+  bundles:
+    # cockroachdb.v3.0.7
+    - image: docker.io/joelanford/cockroachdb-bundle@sha256:c05980d372ec366a5d51fbe653e6a6e52fc97a9db03cf689267293fa7a030248
+    # cockroachdb.v5.0.3
+    - image: docker.io/joelanford/cockroachdb-bundle@sha256:7207dcfbbe707de85d85ddb1ad99e382080a3a8852dcfcfd7499b9c6789a582a
+    # cockroachdb.v5.0.4
+    - image: docker.io/joelanford/cockroachdb-bundle@sha256:c57121d9e19de80936df6f04aad5f43b4896d25fb8aa5213c8357f81e5402472
