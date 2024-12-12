@@ -32,7 +32,6 @@ go install github.com/joelanford/catalog-template-template@latest
 ## Example
 
 ```console
-pushd testdata
-go run . ./testdata/cockroachdb
-cat ./testdata/cockroachdb/catalog-templates/*
+go run . ./testdata/cockroachdb --registry-namespace=example.com/myrepo
+cat ./testdata/cockroachdb/catalogs/*/catalog.json
 ```

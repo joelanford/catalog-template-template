@@ -11,6 +11,7 @@ entries:
     defaultChannel: stable
   - schema: olm.channel
     package: cockroachdb
+    name: stable
     entries:
 {{- range $i, $b := .Bundles }}
       - name: {{ .Name }}
@@ -23,7 +24,7 @@ entries:
 {{- end }}
 {{- range .Bundles }}
   - schema: olm.bundle
-    image: {{ .Image }}
+    image: {{ .KPMFile }}
 {{- end }}
 {{- end -}}
 
@@ -40,6 +41,6 @@ stable:
   bundles:
 {{- range .Bundles }}
     # {{ .Name }}
-    - image: {{ .Image }}
+    - image: {{ .KPMFile }}
 {{- end }}
 {{- end -}}

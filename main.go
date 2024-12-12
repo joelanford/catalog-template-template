@@ -58,19 +58,29 @@ func rootCmd() *cobra.Command {
 }
 
 func run(packageDir, registryNamespace string) error {
-	packageDirs, err := os.ReadDir(packageDir)
+	kpmFileDir, err := os.MkdirTemp("", "ctt-kpmfiles-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(kpmFileDir)
+
+	packageDirEntries, err := os.ReadDir(packageDir)
 	if err != nil {
 		return fmt.Errorf("could not read package directory %s: %v", packageDir, err)
 	}
 
+	if err := os.RemoveAll(filepath.Join(packageDir, "catalogs")); err != nil {
+		return err
+	}
+
 	var bundles []Bundle
-	for _, dirEntry := range packageDirs {
-		if !dirEntry.IsDir() || dirEntry.Name() == "catalog-templates" {
+	for _, dirEntry := range packageDirEntries {
+		if !dirEntry.IsDir() || dirEntry.Name() == "catalogs" {
 			continue
 		}
 
 		bundleDir := filepath.Join(packageDir, dirEntry.Name())
-		b, err := buildBundle(bundleDir, registryNamespace)
+		b, err := buildBundle(bundleDir, registryNamespace, kpmFileDir)
 		if err != nil {
 			return fmt.Errorf("could not build bundle %s: %v", bundleDir, err)
 		}
@@ -118,18 +128,19 @@ func run(packageDir, registryNamespace string) error {
 		return cmp.Compare(a.Minor, b.Minor)
 	})
 
+	fbcTemplateFiles := map[CatalogVersion]string{}
 	for _, cv := range sortedVersions {
 		catalogBundles := bundlesForCatalog[cv]
 		slices.SortFunc(catalogBundles, func(a, b Bundle) int {
 			return a.Version.Compare(b.Version)
 		})
-		td := TemplateData{
+		td := FBCTemplateData{
 			CatalogVersion: cv,
 			Bundles:        catalogBundles,
 			Values:         templateValues,
 		}
 
-		outFilePath := filepath.Join(packageDir, "catalog-templates", fmt.Sprintf("v%s.yaml", cv.String))
+		outFilePath := filepath.Join(kpmFileDir, fmt.Sprintf("v%s.catalog.kpmspec.yaml", cv.String))
 		if err := os.MkdirAll(filepath.Dir(outFilePath), 0755); err != nil {
 			return fmt.Errorf("could not create output directory %s: %v", filepath.Dir(outFilePath), err)
 		}
@@ -142,15 +153,29 @@ func run(packageDir, registryNamespace string) error {
 		if err := tpl.Execute(outFile, td); err != nil {
 			return fmt.Errorf("could not execute template: %v", err)
 		}
-		fmt.Println("Wrote template:", outFilePath)
+		fbcTemplateFiles[cv] = outFilePath
 	}
+
+	for cv, fbcTemplateFile := range fbcTemplateFiles {
+		if err := buildCatalog(cv, packageDir, fbcTemplateFile, kpmFileDir); err != nil {
+			return fmt.Errorf("could not build catalog %s: %v", cv.String, err)
+		}
+	}
+
 	return nil
 }
 
-type TemplateData struct {
+type FBCTemplateData struct {
 	CatalogVersion CatalogVersion
 	Bundles        []Bundle
 	Values         map[string]interface{}
+}
+
+type CatalogSpecData struct {
+	CatalogVersion CatalogVersion
+	MigrationLevel string
+	CacheFormat    string
+	TemplateFile   string
 }
 
 type CatalogVersion struct {
@@ -160,9 +185,11 @@ type CatalogVersion struct {
 }
 
 type Bundle struct {
+	Package string
 	Name    string
 	Version semver.Version
 	Image   string
+	KPMFile string
 
 	catalogVersions sets.Set[CatalogVersion]
 }
@@ -171,60 +198,56 @@ type BundleReleaseConfig struct {
 	CatalogVersions []string `yaml:"catalogVersions"`
 }
 
-func buildBundle(bundleDir, registryNamespace string) (*Bundle, error) {
+func buildBundle(bundleDir, registryNamespace, kpmFileDir string) (*Bundle, error) {
 	absBundleDir, err := filepath.Abs(bundleDir)
 	if err != nil {
 		return nil, err
 	}
 
-	tmpSpecFile, err := os.CreateTemp("", fmt.Sprintf("build-bundle-%s-*", filepath.Base(bundleDir)))
+	specFileName := filepath.Join(kpmFileDir, fmt.Sprintf("%s.bundle.kpmspec.yaml", filepath.Base(absBundleDir)))
+	specFile, err := os.Create(specFileName)
 	if err != nil {
 		return nil, err
 	}
-	defer os.Remove(tmpSpecFile.Name())
 
 	specFileString := fmt.Sprintf(`apiVersion: specs.kpm.io/v1
 kind: Bundle
 bundleRoot: %s
 registryNamespace: %s
 `, absBundleDir, registryNamespace)
-	if _, err := tmpSpecFile.WriteString(specFileString); err != nil {
+	if _, err := specFile.WriteString(specFileString); err != nil {
 		return nil, err
 	}
-	if err := tmpSpecFile.Close(); err != nil {
+	if err := specFile.Close(); err != nil {
 		return nil, err
 	}
 
-	buildOut, err := exec.Command("kpm", "build", "bundle", tmpSpecFile.Name()).CombinedOutput()
+	kpmFileName := filepath.Join(kpmFileDir, fmt.Sprintf("%s.bundle.kpm", filepath.Base(bundleDir)))
+	buildOut, err := exec.Command("kpm", "build", "bundle", specFile.Name(), fmt.Sprintf("--output=%s", kpmFileName)).CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("exec: kpm build bundle: %v", err)
+		return nil, fmt.Errorf("exec: kpm build bundle: %v\nCommand output:\n%s", err, string(buildOut))
 	}
-	var kpmFileName string
-	for _, word := range strings.Split(string(buildOut), " ") {
-		if strings.HasSuffix(word, "bundle.kpm") {
-			kpmFileName = word
-			break
-		}
-	}
-	if kpmFileName == "" {
-		return nil, fmt.Errorf("could not find kpm bundle in build output for bundle %q", bundleDir)
-	}
-	defer os.Remove(kpmFileName)
 
-	var buf bytes.Buffer
+	var (
+		allBuf bytes.Buffer
+		outBuf bytes.Buffer
+		aw     = io.MultiWriter(&outBuf, &allBuf)
+	)
+
 	renderCmd := exec.Command("kpm", "render", kpmFileName)
-	renderCmd.Stderr = io.Discard
-	renderCmd.Stdout = &buf
+	renderCmd.Stderr = &allBuf
+	renderCmd.Stdout = aw
 	if err := renderCmd.Run(); err != nil {
-		return nil, fmt.Errorf("exec: kpm render: %v", err)
+		return nil, fmt.Errorf("exec: kpm render: %v\nCommand output:\n%s", err, string(allBuf.Bytes()))
 	}
-	renderOut := buf.Bytes()
+	renderOut := outBuf.Bytes()
 
 	var b declcfg.Bundle
 	if err := json.Unmarshal(renderOut, &b); err != nil {
 		return nil, err
 	}
 
+	pkg := b.Package
 	name := b.Name
 	image := b.Image
 
@@ -288,10 +311,67 @@ registryNamespace: %s
 	}
 
 	return &Bundle{
+		Package: pkg,
 		Name:    name,
 		Image:   image,
 		Version: semverVersion,
+		KPMFile: kpmFileName,
 
 		catalogVersions: catalogVersions,
 	}, nil
+}
+
+func buildCatalog(catalogVersion CatalogVersion, packageDir, templateFile, kpmFileDir string) error {
+	specFileName := filepath.Join(kpmFileDir, fmt.Sprintf("%s.catalog.kpmspec.yaml", catalogVersion.String))
+	specFile, err := os.Create(specFileName)
+	if err != nil {
+		return err
+	}
+
+	specFileString := fmt.Sprintf(`apiVersion: specs.kpm.io/v1
+kind: Catalog
+
+tag: "localhost/catalog:%s"
+migrationLevel: bundle-object-to-csv-metadata
+cacheFormat: pogreb.v1
+
+source:
+  sourceType: fbcTemplate
+  fbcTemplate:
+    templateFile: %s
+`, catalogVersion.String, templateFile)
+	if _, err := specFile.WriteString(specFileString); err != nil {
+		return err
+	}
+	if err := specFile.Close(); err != nil {
+		return err
+	}
+
+	kpmFileName := filepath.Join(kpmFileDir, fmt.Sprintf("catalog-%s.catalog.kpm", catalogVersion.String))
+	buildOut, err := exec.Command("kpm", "build", "catalog", specFile.Name(), fmt.Sprintf("--output=%s", kpmFileDir)).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("exec: kpm build catalog: %v\nCommand output:\n%s", err, string(buildOut))
+	}
+
+	catalogFileName := filepath.Join(packageDir, "catalogs", fmt.Sprintf("v%s", catalogVersion.String), "catalog.json")
+	if err := os.MkdirAll(filepath.Dir(catalogFileName), 0755); err != nil {
+		return err
+	}
+	catalogFile, err := os.Create(catalogFileName)
+	if err != nil {
+		return err
+	}
+
+	var (
+		allBuf bytes.Buffer
+		aw     = io.MultiWriter(catalogFile, &allBuf)
+	)
+
+	renderCmd := exec.Command("kpm", "render", kpmFileName)
+	renderCmd.Stderr = &allBuf
+	renderCmd.Stdout = aw
+	if err := renderCmd.Run(); err != nil {
+		return fmt.Errorf("exec: kpm render: %v\nCommand output:\n%s", err, string(allBuf.Bytes()))
+	}
+	return nil
 }
